@@ -1,316 +1,213 @@
--- The Zombies Revenge - FIXED CURRENCY GUI (Coins + Tokens) + Kill Switch
--- Fixed "ghost" currency - now fires remotes properly
+-- Stealth MTC ESP v2 - 2D Drawing + optional tiny GUI toggles
+-- Team colors via plr.TeamColor (prevents friendly fire stupidity)
+
+game.StarterGui:SetCore("SendNotification", {
+    Title = "Stealth MTC ESP v2",
+    Text = "RightShift / Button = Player ESP\nLeftShift / Button = Vehicle ESP\nUses TeamColor - enemies only look different",
+    Duration = 8
+})
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Camera = workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
 
-local player = Players.LocalPlayer
-local character = player.Character or player.CharacterAdded:Wait()
-local root = character:WaitForChild("HumanoidRootPart")
+getgenv().PlayerESP = true
+getgenv().VehicleESP = true
+getgenv().ShowOnlyEnemies = true  -- NEW: hide teammates if true
 
-local killAuraEnabled = false
-local killRange = 25
-local damagePerTick = 50
-local damageCooldown = 0.07
+local useMinimalGUI = true  -- set false to remove buttons completely (pure hotkeys)
 
-local lastDamage = {}
-local auraConnection = nil
-local guiAlive = true
+local playerDrawings = {}
+local vehicleDrawings = {}
 
--- Anti-detect
-local oldNamecall
-oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-    local method = getnamecallmethod()
-    if method == "FireServer" and (tostring(self):lower():find("ban") or tostring(self):lower():find("kick")) then
-        return
-    end
-    return oldNamecall(self, ...)
-end)
-
-local screenGui = Instance.new("ScreenGui")
-screenGui.ResetOnSpawn = false
-screenGui.Parent = player:WaitForChild("PlayerGui")
-
-local mainFrame = Instance.new("Frame")
-mainFrame.Size = UDim2.new(0, 360, 0, 620)
-mainFrame.Position = UDim2.new(0.5, -180, 0.05, 0)
-mainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
-mainFrame.BorderSizePixel = 0
-mainFrame.Active = true
-mainFrame.Draggable = true
-mainFrame.Parent = screenGui
-
-Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 12)
-
-local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, 0, 0, 50)
-title.BackgroundTransparency = 1
-title.Text = "The Zombies Revenge GUI"
-title.TextColor3 = Color3.fromRGB(255, 80, 80)
-title.TextScaled = true
-title.Font = Enum.Font.GothamBold
-title.Parent = mainFrame
-
--- KILL AURA SECTION
-local killTitle = Instance.new("TextLabel")
-killTitle.Size = UDim2.new(0.9, 0, 0, 30)
-killTitle.Position = UDim2.new(0.05, 0, 0, 60)
-killTitle.BackgroundTransparency = 1
-killTitle.Text = "KILL AURA"
-killTitle.TextColor3 = Color3.fromRGB(255, 100, 100)
-killTitle.TextScaled = true
-killTitle.Font = Enum.Font.GothamBold
-killTitle.Parent = mainFrame
-
-local toggleBtn = Instance.new("TextButton")
-toggleBtn.Size = UDim2.new(0.9, 0, 0, 55)
-toggleBtn.Position = UDim2.new(0.05, 0, 0, 95)
-toggleBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-toggleBtn.Text = "Kill Aura: OFF"
-toggleBtn.TextColor3 = Color3.new(1,1,1)
-toggleBtn.TextScaled = true
-toggleBtn.Font = Enum.Font.GothamSemibold
-toggleBtn.Parent = mainFrame
-Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(0, 8)
-
-local rangeLabel = Instance.new("TextLabel")
-rangeLabel.Size = UDim2.new(0.9, 0, 0, 30)
-rangeLabel.Position = UDim2.new(0.05, 0, 0, 160)
-rangeLabel.BackgroundTransparency = 1
-rangeLabel.Text = "Range: 25 studs"
-rangeLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
-rangeLabel.TextScaled = true
-rangeLabel.Font = Enum.Font.Gotham
-rangeLabel.Parent = mainFrame
-
-local sliderFrame = Instance.new("Frame")
-sliderFrame.Size = UDim2.new(0.9, 0, 0, 25)
-sliderFrame.Position = UDim2.new(0.05, 0, 0, 195)
-sliderFrame.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
-sliderFrame.Parent = mainFrame
-Instance.new("UICorner", sliderFrame).CornerRadius = UDim.new(1, 0)
-
-local sliderFill = Instance.new("Frame")
-sliderFill.Size = UDim2.new(0.25, 0, 1, 0)
-sliderFill.BackgroundColor3 = Color3.fromRGB(255, 70, 70)
-sliderFill.Parent = sliderFrame
-Instance.new("UICorner", sliderFill).CornerRadius = UDim.new(1, 0)
-
-local function isValidEnemy(obj)
-    if not obj or not obj:IsA("Model") or obj == character then return false end
-    local hum = obj:FindFirstChild("Humanoid")
-    if not hum or hum.Health <= 0 then return false end
-    if Players:GetPlayerFromCharacter(obj) then return false end
-    local n = obj.Name:lower()
-    if n:find("core") or n:find("gate") or n:find("hero") or n:find("friendly") then return false end
-    if obj:FindFirstChild("Friendly") or obj:FindFirstChild("Hero") then return false end
-    return true
+local function getDistance(pos1, pos2)
+    return math.floor((pos1 - pos2).Magnitude)
 end
 
-local function startKillAura()
-    if auraConnection then auraConnection:Disconnect() end
-    auraConnection = RunService.Heartbeat:Connect(function()
-        if not killAuraEnabled or not root or not guiAlive then return end
-        for _, obj in ipairs(workspace:GetChildren()) do
-            if isValidEnemy(obj) then
-                local hrp = obj:FindFirstChild("HumanoidRootPart") or obj:FindFirstChild("Torso")
-                if hrp and (root.Position - hrp.Position).Magnitude <= killRange then
-                    local hum = obj:FindFirstChild("Humanoid")
-                    local now = tick()
-                    if not lastDamage[obj] or (now - lastDamage[obj]) >= damageCooldown then
-                        hum:TakeDamage(damagePerTick)
-                        lastDamage[obj] = now
+local function isEnemy(plr)
+    if not getgenv().ShowOnlyEnemies then return true end
+    if not LocalPlayer.Team then return true end
+    return plr.Team ~= LocalPlayer.Team
+end
+
+-- Minimal GUI (two tiny buttons)
+local gui, playerBtn, vehicleBtn
+if useMinimalGUI then
+    gui = Instance.new("ScreenGui")
+    gui.Name = "ESPControls"  -- keep name generic
+    gui.ResetOnSpawn = false
+    gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+    local frame = Instance.new("Frame", gui)
+    frame.Size = UDim2.new(0, 120, 0, 60)
+    frame.Position = UDim2.new(0, 10, 0, 10)
+    frame.BackgroundTransparency = 0.6
+    frame.BackgroundColor3 = Color3.new(0,0,0)
+
+    playerBtn = Instance.new("TextButton", frame)
+    playerBtn.Size = UDim2.new(1,0,0.5,0)
+    playerBtn.Position = UDim2.new(0,0,0,0)
+    playerBtn.Text = "Player ESP: ON"
+    playerBtn.BackgroundColor3 = Color3.fromRGB(40,40,40)
+    playerBtn.TextColor3 = Color3.new(1,1,1)
+
+    vehicleBtn = Instance.new("TextButton", frame)
+    vehicleBtn.Size = UDim2.new(1,0,0.5,0)
+    vehicleBtn.Position = UDim2.new(0,0,0.5,0)
+    vehicleBtn.Text = "Vehicle ESP: ON"
+    vehicleBtn.BackgroundColor3 = Color3.fromRGB(40,40,40)
+    vehicleBtn.TextColor3 = Color3.new(1,1,1)
+
+    playerBtn.MouseButton1Click:Connect(function()
+        getgenv().PlayerESP = not getgenv().PlayerESP
+        playerBtn.Text = "Player ESP: " .. (getgenv().PlayerESP and "ON" or "OFF")
+    end)
+
+    vehicleBtn.MouseButton1Click:Connect(function()
+        getgenv().VehicleESP = not getgenv().VehicleESP
+        vehicleBtn.Text = "Vehicle ESP: " .. (getgenv().VehicleESP and "ON" or "OFF")
+    end)
+end
+
+-- Hotkeys still work
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if input.KeyCode == Enum.KeyCode.RightShift then
+        getgenv().PlayerESP = not getgenv().PlayerESP
+        game.StarterGui:SetCore("SendNotification", {Title = "Player ESP", Text = getgenv().PlayerESP and "ON" or "OFF"})
+        if playerBtn then playerBtn.Text = "Player ESP: " .. (getgenv().PlayerESP and "ON" or "OFF") end
+    elseif input.KeyCode == Enum.KeyCode.LeftShift then
+        getgenv().VehicleESP = not getgenv().VehicleESP
+        game.StarterGui:SetCore("SendNotification", {Title = "Vehicle ESP", Text = getgenv().VehicleESP and "ON" or "OFF"})
+        if vehicleBtn then vehicleBtn.Text = "Vehicle ESP: " .. (getgenv().VehicleESP and "ON" or "OFF") end
+    end
+end)
+
+-- Cleanup functions (same as before)
+local function cleanupPlayer(plr)
+    if playerDrawings[plr] then
+        for _, obj in pairs(playerDrawings[plr]) do obj:Remove() end
+        playerDrawings[plr] = nil
+    end
+end
+
+local function cleanupVehicle(veh)
+    if vehicleDrawings[veh] then
+        for _, obj in pairs(vehicleDrawings[veh]) do obj:Remove() end
+        vehicleDrawings[veh] = nil
+    end
+end
+Players.PlayerRemoving:Connect(cleanupPlayer)
+
+RunService.RenderStepped:Connect(function()
+    local myPos = (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") and LocalPlayer.Character.HumanoidRootPart.Position) or Vector3.new()
+
+    -- PLAYER ESP
+    if getgenv().PlayerESP then
+        for _, plr in pairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") and plr.Character:FindFirstChild("Head") and isEnemy(plr) then
+                local hrp = plr.Character.HumanoidRootPart
+                local head = plr.Character.Head
+                local rootPos, _ = Camera:WorldToViewportPoint(hrp.Position)
+                local headPos, _ = Camera:WorldToViewportPoint(head.Position)
+
+                if rootPos.Z > 0 then
+                    local dist = getDistance(myPos, hrp.Position)
+
+                    if not playerDrawings[plr] then
+                        playerDrawings[plr] = {
+                            Box = Drawing.new("Square"),
+                            Name = Drawing.new("Text"),
+                            Distance = Drawing.new("Text")
+                        }
+                        local d = playerDrawings[plr]
+                        d.Box.Thickness = 2
+                        d.Box.Filled = false
+                        d.Box.Transparency = 1
+                        d.Name.Size = 14
+                        d.Name.Center = true
+                        d.Name.Outline = true
+                        d.Name.Font = 2  -- UI
+                        d.Distance.Size = 12
+                        d.Distance.Center = true
+                        d.Distance.Outline = true
+                        d.Distance.Font = 2
+                    end
+
+                    local d = playerDrawings[plr]
+                    local boxHeight = math.abs(headPos.Y - rootPos.Y) * 1.8
+                    d.Box.Size = Vector2.new(boxHeight * 0.55, boxHeight)
+                    d.Box.Position = Vector2.new(rootPos.X - boxHeight * 0.275, rootPos.Y - boxHeight * 0.5)
+                    d.Box.Color = plr.TeamColor.Color  -- team color!
+                    d.Box.Visible = true
+
+                    d.Name.Text = plr.Name
+                    d.Name.Color = plr.TeamColor.Color
+                    d.Name.Position = Vector2.new(rootPos.X, rootPos.Y - boxHeight * 0.5 - 18)
+                    d.Name.Visible = true
+
+                    d.Distance.Text = dist .. "m"
+                    d.Distance.Color = Color3.new(1,1,1)
+                    d.Distance.Position = Vector2.new(rootPos.X, rootPos.Y + boxHeight * 0.5 + 5)
+                    d.Distance.Visible = true
+                else
+                    if playerDrawings[plr] then for _,obj in pairs(playerDrawings[plr]) do obj.Visible = false end end
+                end
+            else
+                cleanupPlayer(plr)
+            end
+        end
+    else
+        for _,data in pairs(playerDrawings) do for _,obj in pairs(data) do obj.Visible = false end end
+    end
+
+    -- VEHICLE ESP (same as before, but can add team check later if vehicles expose Team)
+    if getgenv().VehicleESP then
+        local spawned = workspace:FindFirstChild("SpawnedVehicles")
+        if spawned then
+            for veh,_ in pairs(vehicleDrawings) do
+                if not veh.Parent or veh.Parent ~= spawned then cleanupVehicle(veh) end
+            end
+
+            for _, veh in pairs(spawned:GetChildren()) do
+                if veh:IsA("Model") then
+                    local pivot = veh:GetPivot().Position
+                    local screen, onScreen = Camera:WorldToViewportPoint(pivot + Vector3.new(0,8,0))
+
+                    if onScreen and screen.Z > 0 then
+                        local dist = getDistance(myPos, pivot)
+                        -- could try to detect team color from a part if exists, but name works ok
+                        local color = Color3.fromRGB(255,0,0)  -- default enemy red; adjust per faction if needed
+
+                        if not vehicleDrawings[veh] then
+                            vehicleDrawings[veh] = {
+                                Name = Drawing.new("Text"),
+                                Distance = Drawing.new("Text")
+                            }
+                            local d = vehicleDrawings[veh]
+                            d.Name.Size = 14; d.Name.Center=true; d.Name.Outline=true; d.Name.Font=2
+                            d.Distance.Size=12; d.Distance.Center=true; d.Distance.Outline=true; d.Distance.Font=2
+                        end
+
+                        local d = vehicleDrawings[veh]
+                        d.Name.Text = veh.Name
+                        d.Name.Color = color
+                        d.Name.Position = Vector2.new(screen.X, screen.Y - 25)
+                        d.Name.Visible = true
+
+                        d.Distance.Text = dist .. "m"
+                        d.Distance.Color = Color3.new(1,1,1)
+                        d.Distance.Position = Vector2.new(screen.X, screen.Y + 5)
+                        d.Distance.Visible = true
+                    else
+                        if vehicleDrawings[veh] then for _,obj in pairs(vehicleDrawings[veh]) do obj.Visible = false end end
                     end
                 end
             end
         end
-    end)
-end
-
-toggleBtn.MouseButton1Click:Connect(function()
-    if not guiAlive then return end
-    killAuraEnabled = not killAuraEnabled
-    if killAuraEnabled then
-        toggleBtn.Text = "Kill Aura: ON"
-        toggleBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
-        startKillAura()
     else
-        toggleBtn.Text = "Kill Aura: OFF"
-        toggleBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-        if auraConnection then auraConnection:Disconnect() auraConnection = nil end
-        lastDamage = {}
+        for _,data in pairs(vehicleDrawings) do for _,obj in pairs(data) do obj.Visible = false end end
     end
 end)
-
--- Slider
-local dragging = false
-sliderFrame.InputBegan:Connect(function(i)
-    if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true end
-end)
-UserInputService.InputEnded:Connect(function(i)
-    if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
-end)
-
-RunService.RenderStepped:Connect(function()
-    if dragging then
-        local rel = math.clamp((UserInputService:GetMouseLocation().X - sliderFrame.AbsolutePosition.X) / sliderFrame.AbsoluteSize.X, 0, 1)
-        sliderFill.Size = UDim2.new(rel, 0, 1, 0)
-        killRange = math.floor(5 + rel * 895)
-        rangeLabel.Text = "Range: " .. killRange .. " studs"
-    end
-end)
-
--- CURRENCY SECTION
-local currencyTitle = Instance.new("TextLabel")
-currencyTitle.Size = UDim2.new(0.9, 0, 0, 30)
-currencyTitle.Position = UDim2.new(0.05, 0, 0, 235)
-currencyTitle.BackgroundTransparency = 1
-currencyTitle.Text = "CURRENCY GIVERS (Fixed Ghost Issue)"
-currencyTitle.TextColor3 = Color3.fromRGB(100, 200, 255)
-currencyTitle.TextScaled = true
-currencyTitle.Font = Enum.Font.GothamBold
-currencyTitle.Parent = mainFrame
-
-local selectBtn = Instance.new("TextButton")
-selectBtn.Size = UDim2.new(0.9, 0, 0, 45)
-selectBtn.Position = UDim2.new(0.05, 0, 0, 270)
-selectBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-selectBtn.Text = "Selected: " .. player.Name
-selectBtn.TextColor3 = Color3.new(1,1,1)
-selectBtn.TextScaled = true
-selectBtn.Font = Enum.Font.Gotham
-selectBtn.Parent = mainFrame
-Instance.new("UICorner", selectBtn).CornerRadius = UDim.new(0, 6)
-
-local selectedPlayer = player
-
-selectBtn.MouseButton1Click:Connect(function()
-    if not guiAlive then return end
-    local plrs = Players:GetPlayers()
-    local idx = 1
-    for i, p in ipairs(plrs) do
-        if p == selectedPlayer then idx = i break end
-    end
-    idx = (idx % #plrs) + 1
-    selectedPlayer = plrs[idx]
-    selectBtn.Text = "Selected: " .. selectedPlayer.Name
-end)
-
-local amountBox = Instance.new("TextBox")
-amountBox.Size = UDim2.new(0.9, 0, 0, 45)
-amountBox.Position = UDim2.new(0.05, 0, 0, 320)
-amountBox.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-amountBox.Text = "10000"
-amountBox.TextColor3 = Color3.new(1,1,1)
-amountBox.TextScaled = true
-amountBox.Font = Enum.Font.Gotham
-amountBox.Parent = mainFrame
-Instance.new("UICorner", amountBox).CornerRadius = UDim.new(0, 6)
-
--- Give Coins
-local giveCoinsBtn = Instance.new("TextButton")
-giveCoinsBtn.Size = UDim2.new(0.9, 0, 0, 50)
-giveCoinsBtn.Position = UDim2.new(0.05, 0, 0, 370)
-giveCoinsBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
-giveCoinsBtn.Text = "GIVE COINS"
-giveCoinsBtn.TextColor3 = Color3.new(1,1,1)
-giveCoinsBtn.TextScaled = true
-giveCoinsBtn.Font = Enum.Font.GothamBold
-giveCoinsBtn.Parent = mainFrame
-Instance.new("UICorner", giveCoinsBtn).CornerRadius = UDim.new(0, 8)
-
-giveCoinsBtn.MouseButton1Click:Connect(function()
-    if not guiAlive then return end
-    local target = selectedPlayer
-    local amt = tonumber(amountBox.Text) or 10000
-    print("→ Giving " .. amt .. " COINS to " .. target.Name)
-
-    -- 1. Leaderstats backup
-    pcall(function()
-        if target:FindFirstChild("leaderstats") then
-            local stat = target.leaderstats:FindFirstChild("Coins") or target.leaderstats:FindFirstChild("Coin") or target.leaderstats:FindFirstChild("Cash")
-            if stat then stat.Value += amt end
-        end
-    end)
-
-    -- 2. Fire ALL possible remotes (this fixes the ghost issue)
-    pcall(function()
-        for _, v in ipairs(ReplicatedStorage:GetDescendants()) do
-            if v:IsA("RemoteEvent") then
-                v:FireServer(target, amt)
-                v:FireServer(amt)
-                v:FireServer("AddCoins", amt)
-            end
-        end
-    end)
-    print("Fired all possible coin remotes - check if it registers now")
-end)
-
--- Give Tokens
-local giveTokensBtn = Instance.new("TextButton")
-giveTokensBtn.Size = UDim2.new(0.9, 0, 0, 50)
-giveTokensBtn.Position = UDim2.new(0.05, 0, 0, 425)
-giveTokensBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
-giveTokensBtn.Text = "GIVE TOKENS"
-giveTokensBtn.TextColor3 = Color3.new(1,1,1)
-giveTokensBtn.TextScaled = true
-giveTokensBtn.Font = Enum.Font.GothamBold
-giveTokensBtn.Parent = mainFrame
-Instance.new("UICorner", giveTokensBtn).CornerRadius = UDim.new(0, 8)
-
-giveTokensBtn.MouseButton1Click:Connect(function()
-    if not guiAlive then return end
-    local target = selectedPlayer
-    local amt = tonumber(amountBox.Text) or 10000
-    print("→ Giving " .. amt .. " TOKENS to " .. target.Name)
-
-    pcall(function()
-        if target:FindFirstChild("leaderstats") then
-            local stat = target.leaderstats:FindFirstChild("Tokens") or target.leaderstats:FindFirstChild("Token")
-            if stat then stat.Value += amt end
-        end
-    end)
-
-    pcall(function()
-        for _, v in ipairs(ReplicatedStorage:GetDescendants()) do
-            if v:IsA("RemoteEvent") then
-                v:FireServer(target, amt)
-                v:FireServer(amt)
-                v:FireServer("AddTokens", amt)
-            end
-        end
-    end)
-    print("Fired all possible token remotes")
-end)
-
--- KILL SWITCH
-local killSwitch = Instance.new("TextButton")
-killSwitch.Size = UDim2.new(0.9, 0, 0, 55)
-killSwitch.Position = UDim2.new(0.05, 0, 0, 490)
-killSwitch.BackgroundColor3 = Color3.fromRGB(170, 0, 0)
-killSwitch.Text = "KILL SWITCH (Stop Everything)"
-killSwitch.TextColor3 = Color3.new(1,1,1)
-killSwitch.TextScaled = true
-killSwitch.Font = Enum.Font.GothamBold
-killSwitch.Parent = mainFrame
-Instance.new("UICorner", killSwitch).CornerRadius = UDim.new(0, 8)
-
-killSwitch.MouseButton1Click:Connect(function()
-    guiAlive = false
-    killAuraEnabled = false
-    if auraConnection then auraConnection:Disconnect() end
-    screenGui:Destroy()
-    print("Script & GUI fully destroyed.")
-end)
-
--- Right Shift toggle visibility
-UserInputService.InputBegan:Connect(function(input)
-    if input.KeyCode == Enum.KeyCode.RightShift and guiAlive then
-        screenGui.Enabled = not screenGui.Enabled
-    end
-end)
-
-print("✅ FIXED GUI LOADED - Currency should now register when buying")
-print("Right Shift = hide/show | Red button = full kill switch")
